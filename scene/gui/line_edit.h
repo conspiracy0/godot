@@ -272,6 +272,8 @@ protected:
 
 	void _notification(int p_what);
 	void _validate_property(PropertyInfo &p_property) const;
+
+	GDVIRTUAL0R(Dictionary, _handle_color_map)
 	static void _bind_methods();
 
 	virtual void unhandled_key_input(const Ref<InputEvent> &p_event) override;
@@ -292,6 +294,9 @@ public:
 	bool has_ime_text() const;
 	void cancel_ime();
 	void apply_ime();
+
+	Dictionary handle_color_map();
+	virtual Dictionary _handle_color_map_impl() { return Dictionary(); }
 
 	void set_horizontal_alignment(HorizontalAlignment p_alignment);
 	HorizontalAlignment get_horizontal_alignment() const;
@@ -438,6 +443,7 @@ public:
 
 	void show_virtual_keyboard();
 
+	void remove_undo_stack(int amount);
 	LineEdit(const String &p_placeholder = String());
 	~LineEdit();
 };
