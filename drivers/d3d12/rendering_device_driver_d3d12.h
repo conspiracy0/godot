@@ -28,12 +28,13 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#ifndef RENDERING_DEVICE_DRIVER_D3D12_H
-#define RENDERING_DEVICE_DRIVER_D3D12_H
+#pragma once
 
+#include "core/templates/a_hash_map.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/paged_allocator.h"
 #include "core/templates/self_list.h"
+#include "rendering_shader_container_d3d12.h"
 #include "servers/rendering/rendering_device_driver.h"
 
 #ifndef _MSC_VER
@@ -41,26 +42,23 @@
 #define __REQUIRED_RPCNDR_H_VERSION__ 475
 #endif
 
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wnon-virtual-dtor"
-#pragma GCC diagnostic ignored "-Wshadow"
-#pragma GCC diagnostic ignored "-Wswitch"
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
-#elif defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wnon-virtual-dtor"
-#pragma clang diagnostic ignored "-Wstring-plus-int"
-#pragma clang diagnostic ignored "-Wswitch"
-#pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#pragma clang diagnostic ignored "-Wimplicit-fallthrough"
-#endif
+GODOT_GCC_WARNING_PUSH
+GODOT_GCC_WARNING_IGNORE("-Wimplicit-fallthrough")
+GODOT_GCC_WARNING_IGNORE("-Wmissing-field-initializers")
+GODOT_GCC_WARNING_IGNORE("-Wnon-virtual-dtor")
+GODOT_GCC_WARNING_IGNORE("-Wshadow")
+GODOT_GCC_WARNING_IGNORE("-Wswitch")
+GODOT_CLANG_WARNING_PUSH
+GODOT_CLANG_WARNING_IGNORE("-Wimplicit-fallthrough")
+GODOT_CLANG_WARNING_IGNORE("-Wmissing-field-initializers")
+GODOT_CLANG_WARNING_IGNORE("-Wnon-virtual-dtor")
+GODOT_CLANG_WARNING_IGNORE("-Wstring-plus-int")
+GODOT_CLANG_WARNING_IGNORE("-Wswitch")
 
-#include "d3dx12.h"
+#include <d3dx12.h>
 #include <dxgi1_6.h>
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
-#include "D3D12MemAlloc.h"
+#include <D3D12MemAlloc.h>
 
 #include <wrl/client.h>
 
@@ -69,18 +67,12 @@
 #undef MemoryBarrier
 #endif
 
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#elif defined(__clang__)
-#pragma clang diagnostic pop
-#endif
+GODOT_GCC_WARNING_POP
+GODOT_CLANG_WARNING_POP
 
 using Microsoft::WRL::ComPtr;
 
-#define D3D12_BITCODE_OFFSETS_NUM_STAGES 3
-
 #ifdef DEV_ENABLED
-//#define DEBUG_COUNT_BARRIERS
 #define CUSTOM_INFO_QUEUE_ENABLED 0
 #endif
 
@@ -117,16 +109,6 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		uint32_t supported_operations_flags_rd() const;
 	};
 
-	struct VRSCapabilities {
-		bool draw_call_supported = false; // We can specify our fragment rate on a draw call level.
-		bool primitive_supported = false; // We can specify our fragment rate on each drawcall.
-		bool primitive_in_multiviewport = false;
-		bool ss_image_supported = false; // We can provide a density map attachment on our framebuffer.
-		uint32_t ss_image_tile_size = 0;
-		uint32_t ss_max_fragment_size = 0;
-		bool additional_rates_supported = false;
-	};
-
 	struct ShaderCapabilities {
 		D3D_SHADER_MODEL shader_model = (D3D_SHADER_MODEL)0;
 		bool native_16bit_ops = false;
@@ -158,45 +140,116 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	uint32_t feature_level = 0; // Major * 10 + minor.
 	SubgroupCapabilities subgroup_capabilities;
 	RDD::MultiviewCapabilities multiview_capabilities;
-	VRSCapabilities vrs_capabilities;
+	FragmentShadingRateCapabilities fsr_capabilities;
+	FragmentDensityMapCapabilities fdm_capabilities;
 	ShaderCapabilities shader_capabilities;
 	StorageBufferCapabilities storage_buffer_capabilities;
 	FormatCapabilities format_capabilities;
 	BarrierCapabilities barrier_capabilities;
 	MiscFeaturesSupport misc_features_support;
+	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;
 
-	class DescriptorsHeap {
+	class CPUDescriptorsHeapPool;
+
+	struct CPUDescriptorsHeapHandle {
+		ID3D12DescriptorHeap *heap = nullptr;
+		CPUDescriptorsHeapPool *pool = nullptr;
+		uint32_t offset = 0;
+		uint32_t base_offset = 0;
+		uint32_t count = 0;
+		uint32_t nonce = 0;
+
+		uint32_t global_offset() const { return offset + base_offset; }
+	};
+
+	class CPUDescriptorsHeapPool {
+		Mutex mutex;
+
+		struct FreeBlockInfo {
+			ID3D12DescriptorHeap *heap = nullptr;
+			uint32_t global_offset = 0; // Global offset in an address space shared by all the heaps.
+			uint32_t base_offset = 0; // The offset inside the space of this heap.
+			uint32_t size = 0;
+			uint32_t nonce = 0;
+		};
+
+		struct FreeBlockSortIndexSort {
+			_FORCE_INLINE_ bool operator()(const uint32_t &p_l, const uint32_t &p_r) const {
+				return p_l > p_r;
+			}
+		};
+
+		typedef RBMap<uint32_t, FreeBlockInfo> OffsetTableType;
+		typedef RBMap<uint32_t, List<uint32_t>, FreeBlockSortIndexSort> SizeTableType;
+
+		OffsetTableType free_blocks_by_offset;
+		SizeTableType free_blocks_by_size;
+		uint32_t current_offset = 0;
+		uint32_t current_nonce = 0;
+
+		void add_to_size_map(const FreeBlockInfo &p_block);
+		void remove_from_size_map(const FreeBlockInfo &p_block);
+		void verify();
+
+	public:
+		Error allocate(ID3D12Device *p_device, const D3D12_DESCRIPTOR_HEAP_DESC &p_desc, CPUDescriptorsHeapHandle &r_result);
+		Error release(const CPUDescriptorsHeapHandle &p_result);
+	};
+
+	class CPUDescriptorsHeapPools {
+		CPUDescriptorsHeapPool pools[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
+
+	public:
+		Error allocate(ID3D12Device *p_device, const D3D12_DESCRIPTOR_HEAP_DESC &p_desc, CPUDescriptorsHeapHandle &r_result);
+	};
+
+	struct CPUDescriptorsHeapWalker {
+		uint32_t handle_size = 0;
+		uint32_t handle_count = 0;
+		D3D12_CPU_DESCRIPTOR_HANDLE first_cpu_handle = {};
+		uint32_t handle_index = 0;
+
+		D3D12_CPU_DESCRIPTOR_HANDLE get_curr_cpu_handle();
+		_FORCE_INLINE_ void rewind() { handle_index = 0; }
+		void advance(uint32_t p_count = 1);
+		uint32_t get_current_handle_index() const { return handle_index; }
+		uint32_t get_free_handles() { return handle_count - handle_index; }
+		bool is_at_eof() { return handle_index == handle_count; }
+	};
+
+	struct GPUDescriptorsHeapWalker : CPUDescriptorsHeapWalker {
+		D3D12_GPU_DESCRIPTOR_HANDLE first_gpu_handle = {};
+
+		D3D12_GPU_DESCRIPTOR_HANDLE get_curr_gpu_handle();
+	};
+
+	class CPUDescriptorsHeap {
+		D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+		CPUDescriptorsHeapHandle handle;
+		uint32_t handle_size = 0;
+
+	public:
+		CPUDescriptorsHeap() = default;
+		Error allocate(RenderingDeviceDriverD3D12 *p_driver, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_descriptor_count);
+		uint32_t get_descriptor_count() const { return desc.NumDescriptors; }
+		~CPUDescriptorsHeap();
+		CPUDescriptorsHeapWalker make_walker() const;
+	};
+
+	class GPUDescriptorsHeap {
 		D3D12_DESCRIPTOR_HEAP_DESC desc = {};
 		ComPtr<ID3D12DescriptorHeap> heap;
 		uint32_t handle_size = 0;
 
 	public:
-		class Walker { // Texas Ranger.
-			friend class DescriptorsHeap;
-
-			uint32_t handle_size = 0;
-			uint32_t handle_count = 0;
-			D3D12_CPU_DESCRIPTOR_HANDLE first_cpu_handle = {};
-			D3D12_GPU_DESCRIPTOR_HANDLE first_gpu_handle = {};
-			uint32_t handle_index = 0;
-
-		public:
-			D3D12_CPU_DESCRIPTOR_HANDLE get_curr_cpu_handle();
-			D3D12_GPU_DESCRIPTOR_HANDLE get_curr_gpu_handle();
-			_FORCE_INLINE_ void rewind() { handle_index = 0; }
-			void advance(uint32_t p_count = 1);
-			uint32_t get_current_handle_index() const { return handle_index; }
-			uint32_t get_free_handles() { return handle_count - handle_index; }
-			bool is_at_eof() { return handle_index == handle_count; }
-		};
-
-		Error allocate(ID3D12Device *m_device, D3D12_DESCRIPTOR_HEAP_TYPE m_type, uint32_t m_descriptor_count, bool p_for_gpu);
+		Error allocate(RenderingDeviceDriverD3D12 *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type, uint32_t p_descriptor_count);
 		uint32_t get_descriptor_count() const { return desc.NumDescriptors; }
 		ID3D12DescriptorHeap *get_heap() const { return heap.Get(); }
-
-		Walker make_walker() const;
+		GPUDescriptorsHeapWalker make_walker() const;
 	};
+
+	CPUDescriptorsHeapPools cpu_descriptor_pool;
 
 	struct {
 		ComPtr<ID3D12CommandSignature> draw;
@@ -222,20 +275,6 @@ private:
 	/****************/
 
 	ComPtr<D3D12MA::Allocator> allocator;
-
-#define USE_SMALL_ALLOCS_POOL // Disabled by now; seems not to be beneficial as it is in Vulkan.
-#ifdef USE_SMALL_ALLOCS_POOL
-	union AllocPoolKey {
-		struct {
-			D3D12_HEAP_TYPE heap_type;
-			D3D12_HEAP_FLAGS heap_flags;
-		};
-		uint64_t key = 0;
-	};
-	HashMap<uint64_t, ComPtr<D3D12MA::Pool>> small_allocs_pools;
-
-	D3D12MA::Pool *_find_or_create_small_allocs_pool(D3D12_HEAP_TYPE p_heap_type, D3D12_HEAP_FLAGS p_heap_flags);
-#endif
 
 	/******************/
 	/**** RESOURCE ****/
@@ -274,20 +313,11 @@ private:
 		uint8_t groups_count = 0;
 		static const D3D12_RESOURCE_STATES DELETED_GROUP = D3D12_RESOURCE_STATES(0xFFFFFFFFU);
 	};
-	PagedAllocator<HashMapElement<ResourceInfo::States *, BarrierRequest>> res_barriers_requests_allocator;
-	HashMap<ResourceInfo::States *, BarrierRequest, HashMapHasherDefault, HashMapComparatorDefault<ResourceInfo::States *>, decltype(res_barriers_requests_allocator)> res_barriers_requests;
 
-	LocalVector<D3D12_RESOURCE_BARRIER> res_barriers;
-	uint32_t res_barriers_count = 0;
-	uint32_t res_barriers_batch = 0;
-#ifdef DEBUG_COUNT_BARRIERS
-	int frame_barriers_count = 0;
-	int frame_barriers_batches_count = 0;
-	uint64_t frame_barriers_cpu_time = 0;
-#endif
+	struct CommandBufferInfo;
 
-	void _resource_transition_batch(ResourceInfo *p_resource, uint32_t p_subresource, uint32_t p_num_planes, D3D12_RESOURCE_STATES p_new_state);
-	void _resource_transitions_flush(ID3D12GraphicsCommandList *p_cmd_list);
+	void _resource_transition_batch(CommandBufferInfo *p_command_buffer, ResourceInfo *p_resource, uint32_t p_subresource, uint32_t p_num_planes, D3D12_RESOURCE_STATES p_new_state);
+	void _resource_transitions_flush(CommandBufferInfo *p_command_buffer);
 
 	/*****************/
 	/**** BUFFERS ****/
@@ -308,6 +338,7 @@ public:
 	virtual uint64_t buffer_get_allocation_size(BufferID p_buffer) override final;
 	virtual uint8_t *buffer_map(BufferID p_buffer) override final;
 	virtual void buffer_unmap(BufferID p_buffer) override final;
+	virtual uint64_t buffer_get_device_address(BufferID p_buffer) override final;
 
 	/*****************/
 	/**** TEXTURE ****/
@@ -330,10 +361,14 @@ private:
 
 		UINT mapped_subresource = UINT_MAX;
 		SelfList<TextureInfo> pending_clear{ this };
+#ifdef DEBUG_ENABLED
+		bool created_from_extension = false;
+#endif
 	};
 	SelfList<TextureInfo>::List textures_pending_clear;
 
 	HashMap<DXGI_FORMAT, uint32_t> format_sample_counts_mask_cache;
+	Mutex format_sample_counts_mask_cache_mutex;
 
 	uint32_t _find_max_common_supported_sample_count(VectorView<DXGI_FORMAT> p_formats);
 	UINT _compute_component_mapping(const TextureView &p_view);
@@ -341,7 +376,6 @@ private:
 	UINT _compute_plane_slice(DataFormat p_format, TextureAspect p_aspect);
 	UINT _compute_subresource_from_layers(TextureInfo *p_texture, const TextureSubresourceLayers &p_layers, uint32_t p_layer_offset);
 
-	struct CommandBufferInfo;
 	void _discard_texture_subresources(const TextureInfo *p_tex_info, const CommandBufferInfo *p_cmd_buf_info);
 
 protected:
@@ -349,7 +383,7 @@ protected:
 
 public:
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override final;
-	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil) override final;
+	virtual TextureID texture_create_from_extension(uint64_t p_native_texture, TextureType p_type, DataFormat p_format, uint32_t p_array_layers, bool p_depth_stencil, uint32_t p_mipmaps) override final;
 	virtual TextureID texture_create_shared(TextureID p_original_texture, const TextureView &p_view) override final;
 	virtual TextureID texture_create_shared_from_slice(TextureID p_original_texture, const TextureView &p_view, TextureSliceType p_slice_type, uint32_t p_layer, uint32_t p_layers, uint32_t p_mipmap, uint32_t p_mipmaps) override final;
 	virtual void texture_free(TextureID p_texture) override final;
@@ -454,10 +488,14 @@ private:
 	struct CommandPoolInfo {
 		CommandQueueFamilyID queue_family;
 		CommandBufferType buffer_type = COMMAND_BUFFER_TYPE_PRIMARY;
+		// Since there are no command pools in D3D12, we need to track the command buffers created by this pool
+		// so that we can free them when the pool is freed.
+		SelfList<CommandBufferInfo>::List command_buffers;
 	};
 
 public:
 	virtual CommandPoolID command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) override final;
+	virtual bool command_pool_reset(CommandPoolID p_cmd_pool) override final;
 	virtual void command_pool_free(CommandPoolID p_cmd_pool) override final;
 
 	// ----- BUFFER -----
@@ -481,6 +519,9 @@ private:
 	// Leveraging knowledge of actual usage and D3D12 specifics (namely, command lists from the same allocator
 	// can't be freely begun and ended), an allocator per list works better.
 	struct CommandBufferInfo {
+		// Store a self list reference to be used by the command pool.
+		SelfList<CommandBufferInfo> command_buffer_info_elem{ this };
+
 		ComPtr<ID3D12CommandAllocator> cmd_allocator;
 		ComPtr<ID3D12GraphicsCommandList> cmd_list;
 
@@ -492,6 +533,11 @@ private:
 
 		RenderPassState render_pass_state;
 		bool descriptor_heaps_set = false;
+
+		HashMap<ResourceInfo::States *, BarrierRequest> res_barriers_requests;
+		LocalVector<D3D12_RESOURCE_BARRIER> res_barriers;
+		uint32_t res_barriers_count = 0;
+		uint32_t res_barriers_batch = 0;
 	};
 
 public:
@@ -538,8 +584,8 @@ private:
 		bool is_screen = false;
 		Size2i size;
 		TightLocalVector<uint32_t> attachments_handle_inds; // RTV heap index for color; DSV heap index for DSV.
-		DescriptorsHeap rtv_heap;
-		DescriptorsHeap dsv_heap; // Used only if not for screen and some depth-stencil attachments.
+		CPUDescriptorsHeap rtv_heap;
+		CPUDescriptorsHeap dsv_heap; // Used only for depth-stencil attachments.
 
 		TightLocalVector<TextureID> attachments; // Color and depth-stencil. Used if not screen.
 		TextureID vrs_attachment;
@@ -558,6 +604,7 @@ public:
 	/****************/
 	/**** SHADER ****/
 	/****************/
+
 private:
 	static const uint32_t ROOT_SIGNATURE_SIZE = 256;
 	static const uint32_t PUSH_CONSTANT_SIZE = 128; // Mimicking Vulkan.
@@ -573,82 +620,6 @@ private:
 		//   given that most shader templates feature push constants).
 		// - NIR-DXIL runtime data.
 		MAX_UNIFORM_SETS = (ROOT_SIGNATURE_SIZE - PUSH_CONSTANT_SIZE) / sizeof(uint32_t),
-	};
-
-	enum RootSignatureLocationType {
-		RS_LOC_TYPE_RESOURCE,
-		RS_LOC_TYPE_SAMPLER,
-	};
-
-	enum ResourceClass {
-		RES_CLASS_INVALID,
-		RES_CLASS_CBV,
-		RES_CLASS_SRV,
-		RES_CLASS_UAV,
-	};
-
-	struct ShaderBinary {
-		// Version 1: Initial.
-		// Version 2: 64-bit vertex input mask.
-		// Version 3: Added SC stage mask.
-		static const uint32_t VERSION = 3;
-
-		// Phase 1: SPIR-V reflection, where the Vulkan/RD interface of the shader is discovered.
-		// Phase 2: SPIR-V to DXIL translation, where the DXIL interface is discovered, which may have gaps due to optimizations.
-
-		struct DataBinding {
-			// - Phase 1.
-			uint32_t type = 0;
-			uint32_t binding = 0;
-			uint32_t stages = 0;
-			uint32_t length = 0; // Size of arrays (in total elements), or ubos (in bytes * total elements).
-			uint32_t writable = 0;
-			// - Phase 2.
-			uint32_t res_class = 0;
-			uint32_t has_sampler = 0;
-			uint32_t dxil_stages = 0;
-			struct RootSignatureLocation {
-				uint32_t root_param_idx = UINT32_MAX; // UINT32_MAX if unused.
-				uint32_t range_idx = UINT32_MAX; // UINT32_MAX if unused.
-			};
-			RootSignatureLocation root_sig_locations[2]; // Index is RootSignatureLocationType.
-
-			// We need to sort these to fill the root signature locations properly.
-			bool operator<(const DataBinding &p_other) const {
-				return binding < p_other.binding;
-			}
-		};
-
-		struct SpecializationConstant {
-			// - Phase 1.
-			uint32_t type = 0;
-			uint32_t constant_id = 0;
-			union {
-				uint32_t int_value = 0;
-				float float_value;
-				bool bool_value;
-			};
-			uint32_t stage_flags = 0;
-			// - Phase 2.
-			uint64_t stages_bit_offsets[D3D12_BITCODE_OFFSETS_NUM_STAGES] = {};
-		};
-
-		struct Data {
-			uint64_t vertex_input_mask = 0;
-			uint32_t fragment_output_mask = 0;
-			uint32_t specialization_constants_count = 0;
-			uint32_t spirv_specialization_constants_ids_mask = 0;
-			uint32_t is_compute = 0;
-			uint32_t compute_local_size[3] = {};
-			uint32_t set_count = 0;
-			uint32_t push_constant_size = 0;
-			uint32_t dxil_push_constant_stages = 0; // Phase 2.
-			uint32_t nir_runtime_data_root_param_idx = 0; // Phase 2.
-			uint32_t stage_count = 0;
-			uint32_t shader_name_len = 0;
-			uint32_t root_signature_len = 0;
-			uint32_t root_signature_crc = 0;
-		};
 	};
 
 	struct ShaderInfo {
@@ -701,22 +672,13 @@ private:
 		uint32_t root_signature_crc = 0;
 	};
 
-	uint32_t _shader_patch_dxil_specialization_constant(
-			PipelineSpecializationConstantType p_type,
-			const void *p_value,
-			const uint64_t (&p_stages_bit_offsets)[D3D12_BITCODE_OFFSETS_NUM_STAGES],
-			HashMap<ShaderStage, Vector<uint8_t>> &r_stages_bytecodes,
-			bool p_is_first_patch);
 	bool _shader_apply_specialization_constants(
 			const ShaderInfo *p_shader_info,
 			VectorView<PipelineSpecializationConstant> p_specialization_constants,
 			HashMap<ShaderStage, Vector<uint8_t>> &r_final_stages_bytecode);
-	void _shader_sign_dxil_bytecode(ShaderStage p_stage, Vector<uint8_t> &r_dxil_blob);
 
 public:
-	virtual String shader_get_binary_cache_key() override final;
-	virtual Vector<uint8_t> shader_compile_binary_from_spirv(VectorView<ShaderStageSPIRVData> p_spirv, const String &p_shader_name) override final;
-	virtual ShaderID shader_create_from_bytecode(const Vector<uint8_t> &p_shader_binary, ShaderDescription &r_shader_desc, String &r_name) override final;
+	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override final;
 	virtual uint32_t shader_get_layout_hash(ShaderID p_shader) override final;
 	virtual void shader_free(ShaderID p_shader) override final;
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
@@ -733,8 +695,8 @@ private:
 
 	struct UniformSetInfo {
 		struct {
-			DescriptorsHeap resources;
-			DescriptorsHeap samplers;
+			CPUDescriptorsHeap resources;
+			CPUDescriptorsHeap samplers;
 		} desc_heaps;
 
 		struct StateRequirement {
@@ -766,7 +728,7 @@ private:
 	};
 
 public:
-	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index) override final;
+	virtual UniformSetID uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) override final;
 	virtual void uniform_set_free(UniformSetID p_uniform_set) override final;
 
 	// ----- COMMANDS -----
@@ -776,6 +738,7 @@ public:
 private:
 	void _command_check_descriptor_sets(CommandBufferID p_cmd_buffer);
 	void _command_bind_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index, bool p_for_compute);
+	void _command_bind_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count, bool p_for_compute);
 
 public:
 	/******************/
@@ -797,10 +760,25 @@ public:
 	/**** PIPELINE ****/
 	/******************/
 
-	virtual void pipeline_free(PipelineID p_pipeline) override final;
+	struct RenderPipelineInfo {
+		const VertexFormatInfo *vf_info = nullptr;
 
-private:
-	HashMap<ID3D12PipelineState *, const ShaderInfo *> pipelines_shaders;
+		struct {
+			D3D12_PRIMITIVE_TOPOLOGY primitive_topology = {};
+			Color blend_constant;
+			float depth_bounds_min = 0.0f;
+			float depth_bounds_max = 0.0f;
+			uint32_t stencil_reference = 0;
+		} dyn_params;
+	};
+
+	struct PipelineInfo {
+		ID3D12PipelineState *pso = nullptr;
+		const ShaderInfo *shader_info = nullptr;
+		RenderPipelineInfo render_info;
+	};
+
+	virtual void pipeline_free(PipelineID p_pipeline) override final;
 
 public:
 	// ----- BINDING -----
@@ -829,7 +807,7 @@ private:
 	};
 
 public:
-	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count) override final;
+	virtual RenderPassID render_pass_create(VectorView<Attachment> p_attachments, VectorView<Subpass> p_subpasses, VectorView<SubpassDependency> p_subpass_dependencies, uint32_t p_view_count, AttachmentReference p_fragment_density_map_attachment) override final;
 	virtual void render_pass_free(RenderPassID p_render_pass) override final;
 
 	// ----- COMMANDS -----
@@ -850,6 +828,7 @@ public:
 	// Binding.
 	virtual void command_bind_render_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override final;
 	virtual void command_bind_render_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
+	virtual void command_bind_render_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) override final;
 
 	// Drawing.
 	virtual void command_render_draw(CommandBufferID p_cmd_buffer, uint32_t p_vertex_count, uint32_t p_instance_count, uint32_t p_base_vertex, uint32_t p_first_instance) override final;
@@ -872,20 +851,6 @@ public:
 	virtual void command_render_set_line_width(CommandBufferID p_cmd_buffer, float p_width) override final;
 
 	// ----- PIPELINE -----
-
-private:
-	struct RenderPipelineExtraInfo {
-		struct {
-			D3D12_PRIMITIVE_TOPOLOGY primitive_topology = {};
-			Color blend_constant;
-			float depth_bounds_min = 0.0f;
-			float depth_bounds_max = 0.0f;
-			uint32_t stencil_reference = 0;
-		} dyn_params;
-
-		const VertexFormatInfo *vf_info = nullptr;
-	};
-	HashMap<ID3D12PipelineState *, RenderPipelineExtraInfo> render_psos_extra_info;
 
 public:
 	virtual PipelineID render_pipeline_create(
@@ -911,6 +876,7 @@ public:
 	// Binding.
 	virtual void command_bind_compute_pipeline(CommandBufferID p_cmd_buffer, PipelineID p_pipeline) override final;
 	virtual void command_bind_compute_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
+	virtual void command_bind_compute_uniform_sets(CommandBufferID p_cmd_buffer, VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) override final;
 
 	// Dispatching.
 	virtual void command_compute_dispatch(CommandBufferID p_cmd_buffer, uint32_t p_x_groups, uint32_t p_y_groups, uint32_t p_z_groups) override final;
@@ -962,16 +928,16 @@ public:
 private:
 	struct FrameInfo {
 		struct {
-			DescriptorsHeap resources;
-			DescriptorsHeap samplers;
-			DescriptorsHeap aux;
-			DescriptorsHeap rtv;
+			GPUDescriptorsHeap resources;
+			GPUDescriptorsHeap samplers;
+			CPUDescriptorsHeap aux;
+			CPUDescriptorsHeap rtv;
 		} desc_heaps;
 		struct {
-			DescriptorsHeap::Walker resources;
-			DescriptorsHeap::Walker samplers;
-			DescriptorsHeap::Walker aux;
-			DescriptorsHeap::Walker rtv;
+			GPUDescriptorsHeapWalker resources;
+			GPUDescriptorsHeapWalker samplers;
+			CPUDescriptorsHeapWalker aux;
+			CPUDescriptorsHeapWalker rtv;
 		} desc_heap_walkers;
 		struct {
 			bool resources = false;
@@ -1004,14 +970,18 @@ public:
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
 	virtual uint64_t get_total_memory_used() override final;
+	virtual uint64_t get_lazily_memory_used() override final;
 	virtual uint64_t limit_get(Limit p_limit) override final;
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
 	virtual bool has_feature(Features p_feature) override final;
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
+	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
+	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;
 	virtual String get_api_name() const override final;
 	virtual String get_api_version() const override final;
 	virtual String get_pipeline_cache_uuid() const override final;
 	virtual const Capabilities &get_capabilities() const override final;
+	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;
 
 	virtual bool is_composite_alpha_supported(CommandQueueID p_queue) const override final;
 
@@ -1034,7 +1004,7 @@ private:
 			UniformSetInfo,
 			RenderPassInfo,
 			TimestampQueryPoolInfo>;
-	PagedAllocator<VersatileResource> resources_allocator;
+	PagedAllocator<VersatileResource, true> resources_allocator;
 
 	/******************/
 
@@ -1042,5 +1012,3 @@ public:
 	RenderingDeviceDriverD3D12(RenderingContextDriverD3D12 *p_context_driver);
 	virtual ~RenderingDeviceDriverD3D12();
 };
-
-#endif // RENDERING_DEVICE_DRIVER_D3D12_H

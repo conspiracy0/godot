@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="Node2D" inherits="CanvasItem" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		A 2D game object, inherited by all 2D-related nodes. Has a position, rotation, scale, and Z index.
+		A 2D game object, inherited by all 2D-related nodes. Has a position, rotation, scale, and skew.
 	</brief_description>
 	<description>
 		A 2D game object, with a transform (position, rotation, and scale). All 2D nodes, including physics objects and sprites, inherit from Node2D. Use Node2D as a parent node to move, scale and rotate children in a 2D project. Also gives control of the node's render order.
+		[b]Note:[/b] Since both [Node2D] and [Control] inherit from [CanvasItem], they share several concepts from the class such as the [member CanvasItem.z_index] and [member CanvasItem.visible] properties.
 	</description>
 	<tutorials>
 		<link title="Custom drawing in 2D">$DOCS_URL/tutorials/2d/custom_drawing_in_2d.html</link>
@@ -48,20 +49,20 @@
 				[param point] should not be the same as the node's position, otherwise the node always looks to the right.
 			</description>
 		</method>
-		<method name="move_local_x">
+		<method name="move_local_x" keywords="translate_object_local">
 			<return type="void" />
 			<param index="0" name="delta" type="float" />
 			<param index="1" name="scaled" type="bool" default="false" />
 			<description>
-				Applies a local translation on the node's X axis based on the [method Node._process]'s [param delta]. If [param scaled] is [code]false[/code], normalizes the movement.
+				Applies a local translation on the node's X axis with the amount specified in [param delta]. If [param scaled] is [code]false[/code], normalizes the movement to occur independently of the node's [member scale].
 			</description>
 		</method>
-		<method name="move_local_y">
+		<method name="move_local_y" keywords="translate_object_local">
 			<return type="void" />
 			<param index="0" name="delta" type="float" />
 			<param index="1" name="scaled" type="bool" default="false" />
 			<description>
-				Applies a local translation on the node's Y axis based on the [method Node._process]'s [param delta]. If [param scaled] is [code]false[/code], normalizes the movement.
+				Applies a local translation on the node's Y axis with the amount specified in [param delta]. If [param scaled] is [code]false[/code], normalizes the movement to occur independently of the node's [member scale].
 			</description>
 		</method>
 		<method name="rotate">
