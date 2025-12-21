@@ -1044,7 +1044,6 @@ public:
 
 	/* Viewport. */
 	// Scrolling.
-	void set_smooth_scroll_enabled(bool p_enabled);
 
 	void set_wrap_right_offset(const int value);
 	int get_wrap_right_offset() const;
